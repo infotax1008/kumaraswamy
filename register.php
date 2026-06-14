@@ -1,76 +1,44 @@
 <?php
 require_once __DIR__ . '/config.php';
 
-$errors = [];
-$success = '';
-
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    if (!verifyCsrf($_POST['csrf_token'] ?? null)) {
-        $errors[] = 'Invalid form token. Please try again.';
-    }
-
+    verify_csrf();
     $name = trim($_POST['name'] ?? '');
     $mobile = trim($_POST['mobile'] ?? '');
     $email = strtolower(trim($_POST['email'] ?? ''));
-    $password = $_POST['password'] ?? '';
+    $password = (string) ($_POST['password'] ?? '');
 
-    if ($name === '' || $mobile === '' || $email === '' || $password === '') {
-        $errors[] = 'All fields are required.';
-    }
-    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
-        $errors[] = 'Please enter a valid email address.';
-    }
-    if (strlen($password) < 8) {
-        $errors[] = 'Password must be at least 8 characters.';
-    }
-
-    if (!$errors) {
-        $stmt = $pdo->prepare('SELECT id FROM clients WHERE email = ? LIMIT 1');
-        $stmt->execute([$email]);
-
-        if ($stmt->fetch()) {
-            $errors[] = 'An account with this email already exists.';
-        } else {
-            $hash = password_hash($password, PASSWORD_DEFAULT);
-            $stmt = $pdo->prepare('INSERT INTO clients (name, mobile, email, password_hash, role) VALUES (?, ?, ?, ?, "client")');
-            $stmt->execute([$name, $mobile, $email, $hash]);
-            $success = 'Registration successful. You can now login.';
+    if ($name === '' || $mobile === '' || !filter_var($email, FILTER_VALIDATE_EMAIL) || strlen($password) < 8) {
+        flash('danger', 'Please enter a valid name, mobile, email and a password of at least 8 characters.');
+    } else {
+        try {
+            $stmt = db()->prepare('INSERT INTO clients (name, mobile, email, password_hash, role) VALUES (?, ?, ?, ?, "client")');
+            $stmt->execute([$name, $mobile, $email, password_hash($password, PASSWORD_DEFAULT)]);
+            flash('success', 'Registration successful. Please login.');
+            redirect('login.php');
+        } catch (PDOException $ex) {
+            flash('danger', 'This email is already registered.');
         }
     }
 }
+
+render_header('Register');
 ?>
-<!doctype html>
-<html lang="en">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Client Registration | Kumaraswamy Tax Consultancy</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
-    <link href="assets/css/style.css" rel="stylesheet">
-</head>
-<body class="auth-body">
-<div class="auth-shell">
-    <div class="auth-card">
-        <a class="back-link" href="index.php"><i class="bi bi-arrow-left"></i> Home</a>
-        <h1>Create Client Account</h1>
-        <p>Register to upload documents and access files shared by the office.</p>
-        <?php foreach ($errors as $error): ?><div class="alert alert-danger"><?= e($error) ?></div><?php endforeach; ?>
-        <?php if ($success): ?><div class="alert alert-success"><?= e($success) ?></div><?php endif; ?>
-        <form method="post" novalidate>
-            <input type="hidden" name="csrf_token" value="<?= e(csrfToken()) ?>">
-            <label class="form-label">Name</label>
-            <input class="form-control mb-3" name="name" required>
-            <label class="form-label">Mobile Number</label>
-            <input class="form-control mb-3" name="mobile" required>
-            <label class="form-label">Email</label>
-            <input class="form-control mb-3" type="email" name="email" required>
-            <label class="form-label">Password</label>
-            <input class="form-control mb-4" type="password" name="password" minlength="8" required>
-            <button class="btn btn-primary w-100" type="submit">Register</button>
-        </form>
-        <div class="auth-alt">Already registered? <a href="login.php">Login here</a></div>
+<div class="row justify-content-center">
+  <div class="col-lg-6">
+    <div class="portal-card bg-white p-4 p-lg-5">
+      <h1 class="h3 mb-1">Client Registration</h1>
+      <p class="muted-small mb-4">Create your portal account for document uploads and file downloads.</p>
+      <form method="post" novalidate>
+        <?= csrf_field() ?>
+        <div class="mb-3"><label class="form-label" for="name">Name</label><input class="form-control" id="name" name="name" required></div>
+        <div class="mb-3"><label class="form-label" for="mobile">Mobile Number</label><input class="form-control" id="mobile" name="mobile" required></div>
+        <div class="mb-3"><label class="form-label" for="email">Email</label><input class="form-control" id="email" name="email" type="email" required></div>
+        <div class="mb-4"><label class="form-label" for="password">Password</label><input class="form-control" id="password" name="password" type="password" minlength="8" required></div>
+        <button class="btn btn-primary w-100" type="submit">Register</button>
+      </form>
+      <p class="mt-3 mb-0 muted-small">Already registered? <a href="login.php">Login here</a>.</p>
     </div>
+  </div>
 </div>
-</body>
-</html>
+<?php render_footer(); ?>

@@ -1,145 +1,162 @@
 <?php
 require_once __DIR__ . '/config.php';
-requireAdmin();
+$admin = require_admin();
+handle_file_download($admin);
 
-$notice = '';
-
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && verifyCsrf($_POST['csrf_token'] ?? null)) {
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    verify_csrf();
     $action = $_POST['action'] ?? '';
 
-    if ($action === 'add_client') {
-        $hash = password_hash($_POST['password'] ?? 'ChangeMe123', PASSWORD_DEFAULT);
-        $stmt = $pdo->prepare('INSERT INTO clients (name, mobile, email, password_hash, role) VALUES (?, ?, ?, ?, "client")');
-        $stmt->execute([trim($_POST['name']), trim($_POST['mobile']), strtolower(trim($_POST['email'])), $hash]);
-        $notice = 'Client added.';
+    try {
+        if ($action === 'add_client') {
+            $password = (string) ($_POST['password'] ?? '');
+            if (strlen($password) < 8) {
+                throw new RuntimeException('Password must be at least 8 characters.');
+            }
+            $stmt = db()->prepare('INSERT INTO clients (name, mobile, email, password_hash, role) VALUES (?, ?, ?, ?, ?)');
+            $stmt->execute([
+                trim($_POST['name'] ?? ''),
+                trim($_POST['mobile'] ?? ''),
+                strtolower(trim($_POST['email'] ?? '')),
+                password_hash($password, PASSWORD_DEFAULT),
+                ($_POST['role'] ?? '') === 'admin' ? 'admin' : 'client',
+            ]);
+            flash('success', 'Client added.');
+        }
+
+        if ($action === 'edit_client') {
+            $clientId = (int) ($_POST['client_id'] ?? 0);
+            $password = (string) ($_POST['password'] ?? '');
+            if ($password !== '') {
+                $stmt = db()->prepare('UPDATE clients SET name = ?, mobile = ?, email = ?, role = ?, password_hash = ? WHERE id = ?');
+                $stmt->execute([trim($_POST['name'] ?? ''), trim($_POST['mobile'] ?? ''), strtolower(trim($_POST['email'] ?? '')), ($_POST['role'] ?? '') === 'admin' ? 'admin' : 'client', password_hash($password, PASSWORD_DEFAULT), $clientId]);
+            } else {
+                $stmt = db()->prepare('UPDATE clients SET name = ?, mobile = ?, email = ?, role = ? WHERE id = ?');
+                $stmt->execute([trim($_POST['name'] ?? ''), trim($_POST['mobile'] ?? ''), strtolower(trim($_POST['email'] ?? '')), ($_POST['role'] ?? '') === 'admin' ? 'admin' : 'client', $clientId]);
+            }
+            flash('success', 'Client updated.');
+        }
+
+        if ($action === 'delete_client') {
+            $clientId = (int) ($_POST['client_id'] ?? 0);
+            if ($clientId === (int) $admin['id']) {
+                throw new RuntimeException('You cannot delete your own admin account.');
+            }
+            $stmt = db()->prepare('DELETE FROM clients WHERE id = ?');
+            $stmt->execute([$clientId]);
+            flash('success', 'Client deleted.');
+        }
+
+        if ($action === 'upload_file') {
+            save_uploaded_file((int) ($_POST['client_id'] ?? 0), 'admin_file', 'admin');
+            flash('success', 'File uploaded for client.');
+        }
+
+        if ($action === 'notify') {
+            $clientId = (int) ($_POST['client_id'] ?? 0);
+            $title = trim($_POST['title'] ?? '');
+            $message = trim($_POST['message'] ?? '');
+            if ($title === '' || $message === '') {
+                throw new RuntimeException('Notification title and message are required.');
+            }
+            $stmt = db()->prepare('INSERT INTO notifications (client_id, title, message) VALUES (?, ?, ?)');
+            $stmt->execute([$clientId > 0 ? $clientId : null, $title, $message]);
+            flash('success', 'Notification sent.');
+        }
+    } catch (Throwable $ex) {
+        flash('danger', $ex->getMessage());
     }
 
-    if ($action === 'edit_client') {
-        $stmt = $pdo->prepare('UPDATE clients SET name = ?, mobile = ?, email = ? WHERE id = ? AND role = "client"');
-        $stmt->execute([trim($_POST['name']), trim($_POST['mobile']), strtolower(trim($_POST['email'])), (int) $_POST['client_id']]);
-        $notice = 'Client updated.';
-    }
-
-    if ($action === 'delete_client') {
-        $stmt = $pdo->prepare('DELETE FROM clients WHERE id = ? AND role = "client"');
-        $stmt->execute([(int) $_POST['client_id']]);
-        $notice = 'Client deleted.';
-    }
-
-    if ($action === 'notify') {
-        $clientId = ($_POST['client_id'] ?? '') === 'all' ? null : (int) $_POST['client_id'];
-        $stmt = $pdo->prepare('INSERT INTO notifications (client_id, title, message) VALUES (?, ?, ?)');
-        $stmt->execute([$clientId, trim($_POST['title']), trim($_POST['message'])]);
-        $notice = 'Notification sent.';
-    }
-
-    if ($action === 'upload_file' && isset($_FILES['admin_file']) && $_FILES['admin_file']['error'] === UPLOAD_ERR_OK) {
-        $original = basename($_FILES['admin_file']['name']);
-        $ext = strtolower(pathinfo($original, PATHINFO_EXTENSION));
-        $safeName = uniqid('admin_' . (int) $_POST['client_id'] . '_', true) . '.' . $ext;
-        move_uploaded_file($_FILES['admin_file']['tmp_name'], uploadDir() . DIRECTORY_SEPARATOR . $safeName);
-
-        $stmt = $pdo->prepare('INSERT INTO documents (client_id, uploaded_by, original_name, stored_name, file_type) VALUES (?, "admin", ?, ?, ?)');
-        $stmt->execute([(int) $_POST['client_id'], $original, $safeName, $ext]);
-        $notice = 'File uploaded for client.';
-    }
+    redirect('admin.php');
 }
 
-$clients = $pdo->query('SELECT id, name, mobile, email, role, created_at FROM clients ORDER BY created_at DESC')->fetchAll();
-$clientOnly = array_values(array_filter($clients, fn ($client) => $client['role'] === 'client'));
+$clients = db()->query('SELECT id, name, mobile, email, role, created_at FROM clients ORDER BY created_at DESC')->fetchAll();
+$files = db()->query('SELECT f.*, c.name AS client_name FROM client_files f JOIN clients c ON c.id = f.client_id ORDER BY f.uploaded_at DESC LIMIT 30')->fetchAll();
+
+render_header('Admin Panel');
 ?>
-<!doctype html>
-<html lang="en">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Admin Panel | Kumaraswamy Tax Consultancy</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
-    <link href="assets/css/style.css" rel="stylesheet">
-</head>
-<body class="dashboard-body">
-<nav class="navbar navbar-light bg-white shadow-sm">
-    <div class="container">
-        <a class="navbar-brand fw-bold text-primary" href="index.php">Admin Panel</a>
-        <a class="btn btn-outline-danger" href="logout.php"><i class="bi bi-box-arrow-right me-1"></i>Logout</a>
+<div class="d-flex flex-column flex-lg-row justify-content-between gap-3 mb-4">
+  <div><h1 class="h2 mb-1">Admin Panel</h1><p class="muted-small mb-0">View clients, manage accounts, upload files and send notifications.</p></div>
+  <a class="btn btn-outline-danger align-self-start" href="logout.php">Logout</a>
+</div>
+
+<div class="row g-4 mb-4">
+  <div class="col-lg-5">
+    <div class="portal-card bg-white p-4 h-100">
+      <h2 class="h4">Add Client</h2>
+      <form method="post" class="row g-3">
+        <?= csrf_field() ?><input type="hidden" name="action" value="add_client">
+        <div class="col-md-6"><input class="form-control" name="name" placeholder="Name" required></div>
+        <div class="col-md-6"><input class="form-control" name="mobile" placeholder="Mobile" required></div>
+        <div class="col-md-6"><input class="form-control" name="email" type="email" placeholder="Email" required></div>
+        <div class="col-md-6"><input class="form-control" name="password" type="password" placeholder="Password" minlength="8" required></div>
+        <div class="col-md-6"><select class="form-select" name="role"><option value="client">Client</option><option value="admin">Admin</option></select></div>
+        <div class="col-md-6 d-grid"><button class="btn btn-primary" type="submit">Add</button></div>
+      </form>
     </div>
-</nav>
-<main class="container dashboard-wrap">
-    <div class="dash-header"><div><span class="eyebrow">Administration</span><h1>Client Management</h1></div></div>
-    <?php if ($notice): ?><div class="alert alert-success"><?= e($notice) ?></div><?php endif; ?>
-    <div class="row g-4">
-        <div class="col-lg-4">
-            <section class="dash-card">
-                <h2>Add Client</h2>
-                <form method="post">
-                    <input type="hidden" name="csrf_token" value="<?= e(csrfToken()) ?>">
-                    <input type="hidden" name="action" value="add_client">
-                    <input class="form-control mb-2" name="name" placeholder="Name" required>
-                    <input class="form-control mb-2" name="mobile" placeholder="Mobile" required>
-                    <input class="form-control mb-2" type="email" name="email" placeholder="Email" required>
-                    <input class="form-control mb-3" type="password" name="password" placeholder="Password" required>
-                    <button class="btn btn-primary w-100" type="submit">Add Client</button>
-                </form>
-            </section>
-            <section class="dash-card mt-4">
-                <h2>Upload File for Client</h2>
-                <form method="post" enctype="multipart/form-data">
-                    <input type="hidden" name="csrf_token" value="<?= e(csrfToken()) ?>">
-                    <input type="hidden" name="action" value="upload_file">
-                    <select class="form-select mb-2" name="client_id" required>
-                        <?php foreach ($clientOnly as $client): ?><option value="<?= e((string) $client['id']) ?>"><?= e($client['name']) ?></option><?php endforeach; ?>
-                    </select>
-                    <input class="form-control mb-3" type="file" name="admin_file" required>
-                    <button class="btn btn-primary w-100" type="submit">Upload File</button>
-                </form>
-            </section>
-            <section class="dash-card mt-4">
-                <h2>Send Notification</h2>
-                <form method="post">
-                    <input type="hidden" name="csrf_token" value="<?= e(csrfToken()) ?>">
-                    <input type="hidden" name="action" value="notify">
-                    <select class="form-select mb-2" name="client_id">
-                        <option value="all">All Clients</option>
-                        <?php foreach ($clientOnly as $client): ?><option value="<?= e((string) $client['id']) ?>"><?= e($client['name']) ?></option><?php endforeach; ?>
-                    </select>
-                    <input class="form-control mb-2" name="title" placeholder="Title" required>
-                    <textarea class="form-control mb-3" name="message" placeholder="Message" required></textarea>
-                    <button class="btn btn-primary w-100" type="submit">Send</button>
-                </form>
-            </section>
-        </div>
-        <div class="col-lg-8">
-            <section class="dash-card">
-                <h2>View All Clients</h2>
-                <div class="table-responsive">
-                    <table class="table align-middle">
-                        <thead><tr><th>Name</th><th>Mobile</th><th>Email</th><th>Role</th><th>Actions</th></tr></thead>
-                        <tbody>
-                        <?php foreach ($clients as $client): ?>
-                            <tr>
-                                <form method="post">
-                                    <input type="hidden" name="csrf_token" value="<?= e(csrfToken()) ?>">
-                                    <input type="hidden" name="client_id" value="<?= e((string) $client['id']) ?>">
-                                    <td><input class="form-control form-control-sm" name="name" value="<?= e($client['name']) ?>"></td>
-                                    <td><input class="form-control form-control-sm" name="mobile" value="<?= e($client['mobile']) ?>"></td>
-                                    <td><input class="form-control form-control-sm" name="email" value="<?= e($client['email']) ?>"></td>
-                                    <td><span class="badge text-bg-<?= $client['role'] === 'admin' ? 'primary' : 'secondary' ?>"><?= e($client['role']) ?></span></td>
-                                    <td class="text-nowrap">
-                                        <?php if ($client['role'] === 'client'): ?>
-                                            <button class="btn btn-sm btn-outline-primary" name="action" value="edit_client" type="submit"><i class="bi bi-pencil"></i></button>
-                                            <button class="btn btn-sm btn-outline-danger" name="action" value="delete_client" type="submit" onclick="return confirm('Delete this client?')"><i class="bi bi-trash"></i></button>
-                                        <?php endif; ?>
-                                    </td>
-                                </form>
-                            </tr>
-                        <?php endforeach; ?>
-                        </tbody>
-                    </table>
-                </div>
-            </section>
-        </div>
+  </div>
+  <div class="col-lg-7">
+    <div class="portal-card bg-white p-4 h-100">
+      <h2 class="h4">Upload File for Client</h2>
+      <form method="post" enctype="multipart/form-data" class="row g-3">
+        <?= csrf_field() ?><input type="hidden" name="action" value="upload_file">
+        <div class="col-md-5"><select class="form-select" name="client_id" required><?php foreach ($clients as $client): ?><option value="<?= (int) $client['id'] ?>"><?= e($client['name']) ?> - <?= e($client['email']) ?></option><?php endforeach; ?></select></div>
+        <div class="col-md-4"><input class="form-control" name="admin_file" type="file" required></div>
+        <div class="col-md-3 d-grid"><button class="btn btn-primary" type="submit">Upload</button></div>
+      </form>
+      <hr>
+      <h2 class="h4">Send Notification</h2>
+      <form method="post" class="row g-3">
+        <?= csrf_field() ?><input type="hidden" name="action" value="notify">
+        <div class="col-md-4"><select class="form-select" name="client_id"><option value="0">All Clients</option><?php foreach ($clients as $client): ?><option value="<?= (int) $client['id'] ?>"><?= e($client['name']) ?></option><?php endforeach; ?></select></div>
+        <div class="col-md-4"><input class="form-control" name="title" placeholder="Title" required></div>
+        <div class="col-md-4"><input class="form-control" name="message" placeholder="Message" required></div>
+        <div class="col-12 d-grid"><button class="btn btn-outline-primary" type="submit">Send Notification</button></div>
+      </form>
     </div>
-</main>
-</body>
-</html>
+  </div>
+</div>
+
+<div class="portal-card bg-white p-4 mb-4">
+  <h2 class="h4">All Clients</h2>
+  <div class="table-responsive">
+    <table class="table table-hover align-middle">
+      <thead><tr><th>Name</th><th>Mobile</th><th>Email</th><th>Role</th><th>New Password</th><th>Actions</th></tr></thead>
+      <tbody>
+      <?php foreach ($clients as $client): ?>
+        <tr>
+          <?php $editFormId = 'edit-client-' . (int) $client['id']; ?>
+          <td><input class="form-control form-control-sm" form="<?= e($editFormId) ?>" name="name" value="<?= e($client['name']) ?>" required></td>
+          <td><input class="form-control form-control-sm" form="<?= e($editFormId) ?>" name="mobile" value="<?= e($client['mobile']) ?>" required></td>
+          <td><input class="form-control form-control-sm" form="<?= e($editFormId) ?>" name="email" type="email" value="<?= e($client['email']) ?>" required></td>
+          <td><select class="form-select form-select-sm" form="<?= e($editFormId) ?>" name="role"><option value="client" <?= $client['role'] === 'client' ? 'selected' : '' ?>>Client</option><option value="admin" <?= $client['role'] === 'admin' ? 'selected' : '' ?>>Admin</option></select></td>
+          <td><input class="form-control form-control-sm" form="<?= e($editFormId) ?>" name="password" type="password" placeholder="Leave blank"></td>
+          <td class="d-flex gap-2">
+            <form id="<?= e($editFormId) ?>" method="post">
+              <?= csrf_field() ?><input type="hidden" name="action" value="edit_client"><input type="hidden" name="client_id" value="<?= (int) $client['id'] ?>">
+              <button class="btn btn-sm btn-primary" type="submit">Save</button>
+            </form>
+            <form method="post" onsubmit="return confirm('Delete this client?');">
+              <?= csrf_field() ?><input type="hidden" name="action" value="delete_client"><input type="hidden" name="client_id" value="<?= (int) $client['id'] ?>">
+            <button class="btn btn-sm btn-outline-danger" type="submit">Delete</button>
+            </form>
+          </td>
+        </tr>
+      <?php endforeach; ?>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="portal-card bg-white p-4">
+  <h2 class="h4">Recent Files</h2>
+  <div class="table-responsive">
+    <table class="table table-hover"><thead><tr><th>Client</th><th>File</th><th>Uploaded By</th><th>Date</th><th>Action</th></tr></thead><tbody>
+      <?php foreach ($files as $file): ?>
+        <tr><td><?= e($file['client_name']) ?></td><td><?= e($file['file_name']) ?></td><td><?= e($file['uploaded_by']) ?></td><td><?= e($file['uploaded_at']) ?></td><td><a class="btn btn-sm btn-outline-primary" href="admin.php?download=<?= (int) $file['id'] ?>">Download</a></td></tr>
+      <?php endforeach; ?>
+      <?php if (!$files): ?><tr><td colspan="5" class="text-muted">No files yet.</td></tr><?php endif; ?>
+    </tbody></table>
+  </div>
+</div>
+<?php render_footer(); ?>
